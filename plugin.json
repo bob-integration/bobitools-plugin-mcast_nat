@@ -1,0 +1,93 @@
+{
+  "license": "GPL-3.0-or-later",
+  "type": "mcast_nat",
+  "label": "NAT multicast",
+  "version": "0.1.0",
+  "runtime": "docker",
+  "description": "Surveille le NAT multicast des Cisco Nexus (Multicast Service Reflection) : traductions configurées, émetteur actif, sorties vivantes, vérification en table matérielle, débit réel des liens NAT, alertes, et contrôle des deux jambes 2022-7. Strictement en lecture. Analyse aussi des sorties CLI collées (captures).",
+  "badge": {
+    "label": "NAT",
+    "class": "tool-mcastnat",
+    "oklch": "0.70 0.14 200"
+  },
+  "nav": {
+    "section": "reseau",
+    "label": "Réseau",
+    "order": 25
+  },
+  "ui": {
+    "page_html": "page.html",
+    "page_js": "page.js",
+    "page_css": "page.css"
+  },
+  "docker": {
+    "image": "bobitool-mcast_nat:0.1.0",
+    "build": true,
+    "port": 8080,
+    "volume": "/data",
+    "shared_volumes": [
+      {
+        "volume": "bobitool-switch_ports-data",
+        "mount": "/inventory",
+        "ro": true
+      }
+    ],
+    "env_settings": [
+      "mail_token",
+      "bt_app_url"
+    ]
+  },
+  "requires": [
+    {
+      "type": "switch_ports",
+      "reason": "inventaire des switchs + identifiants NX-API (volume en lecture seule)"
+    }
+  ],
+  "permissions": [
+    {
+      "id": "config.edit",
+      "label": "Régler la surveillance, les paires 2022-7 et les alertes",
+      "default_roles": [
+        "operator"
+      ],
+      "description": "Intervalle, tolérance, paires de switchs, e-mail."
+    },
+    {
+      "id": "capture.manage",
+      "label": "Déposer / supprimer une capture",
+      "default_roles": [
+        "operator"
+      ],
+      "description": "Sorties CLI collées à la main pour analyse hors ligne."
+    }
+  ],
+  "acl": {
+    "routes": [
+      {
+        "method": "PUT",
+        "path": "config",
+        "perm": "config.edit"
+      },
+      {
+        "method": "PUT",
+        "path": "alerts",
+        "perm": "config.edit"
+      },
+      {
+        "method": "POST",
+        "path": "captures",
+        "perm": "capture.manage"
+      },
+      {
+        "method": "DELETE",
+        "path": "captures/**",
+        "perm": "capture.manage"
+      },
+      {
+        "method": "POST",
+        "path": "poll",
+        "perm": null
+      }
+    ]
+  }
+}

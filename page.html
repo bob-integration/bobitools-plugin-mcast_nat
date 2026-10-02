@@ -1,0 +1,14 @@
+<!-- NAT multicast — fragment monté par window.BTTools["mcast_nat"].mount(el, ctx).
+     Toute la logique tourne dans le conteneur ; l'UI passe par ctx.api(...) (proxifié). -->
+<div class="nat-app">
+  <div class="nat-bar">
+    <strong class="nat-title">NAT multicast</strong>
+    <select id="nat-source" title="Switch ou capture"></select>
+    <button class="btn" id="nat-refresh" type="button" title="Relever maintenant">↻ Relever</button>
+    <span class="nat-spacer"></span>
+    <span class="nat-fresh muted" id="nat-fresh"></span>
+  </div>
+  <div class="nat-tabs" id="nat-tabs" role="tablist"></div>
+  <div class="nat-content" id="nat-content"><div class="meta">Chargement…</div></div>
+  <div class="nat-tip" id="nat-tip" hidden></div>
+</div>

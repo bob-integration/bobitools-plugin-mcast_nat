@@ -1,0 +1,8 @@
+{
+  "date": "2026-10-02",
+  "changes": {
+    "Nouveautés": [
+      "v0.1.0 — PREMIÈRE VERSION. Surveille le NAT multicast des Cisco Nexus (Multicast Service Reflection, NX-OS 10.x), strictement en lecture. Les règles `ip service-reflect` sont regroupées par groupe d'entrée : une traduction montre ses sources candidates (nommées d'après la description de leur interface), l'émetteur actif, et chacune de ses sorties avec son interface, ses ports UDP réécrits et ses abonnés. Verdict par traduction : OK, entrée perdue (avec abonnés en attente), NAT en échec (entrée vivante, sortie absente), deux émetteurs simultanés, ou traduction absente de la table matérielle (`show forwarding multicast route`). Le débit RÉEL se lit sur les liens NAT et leurs ports de bouclage ; il n'existe pas de débit par flux sur ces switchs (politiques NBM en `no policer`), et l'écran le dit au lieu d'inventer un chiffre. Alertes en transitions, avec tolérance et récapitulatif quand une même cause touche beaucoup de traductions ; un switch illisible produit UNE alerte, jamais la disparition de ses traductions. Paires 2022-7 : appariement des traductions des deux switchs (par groupe d'entrée, de sortie ou par rang) et état des deux jambes. Captures : des sorties CLI collées s'analysent comme un switch ; la config collée est purgée de tout ce qui n'est pas NAT avant d'être enregistrée."
+    ]
+  }
+}
