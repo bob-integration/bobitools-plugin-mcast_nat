@@ -2,7 +2,7 @@
   "license": "GPL-3.0-or-later",
   "type": "mcast_nat",
   "label": "NAT multicast",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "runtime": "docker",
   "description": "Surveille le NAT multicast des Cisco Nexus (Multicast Service Reflection) : traductions configurées, émetteur actif, sorties vivantes, vérification en table matérielle, débit réel des liens NAT, alertes, et contrôle des deux jambes 2022-7. Strictement en lecture. Analyse aussi des sorties CLI collées (captures).",
   "badge": {
@@ -21,7 +21,7 @@
     "page_css": "page.css"
   },
   "docker": {
-    "image": "bobitool-mcast_nat:0.1.0",
+    "image": "bobitool-mcast_nat:0.2.0",
     "build": true,
     "port": 8080,
     "volume": "/data",

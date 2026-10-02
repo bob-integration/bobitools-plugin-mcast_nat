@@ -13,12 +13,15 @@
   let overview = null, curId = null, tab = "vue", data = null, hist = null;
   let filt = { states: new Set(), family: "", q: "", open: null, limit: 150 };
   let pairSel = null;
+  // Noms tirés de « Plan multicast » (attribution, convention, plage) : {groupe: {name, detail}}.
+  // Facultatifs : sans accès à cet outil, ou s'il n'est pas installé, l'écran reste en adresses.
+  let noms = {};
 
   const esc = (s) => (window.BT ? window.BT.esc(s) : String(s == null ? "" : s));
   const $ = (sel) => EL.querySelector(sel);
   const toast = (m, k) => CTX.toast(m, k || "info");
 
-  const TABS = [["vue", "Vue d'ensemble"], ["trad", "Traductions"], ["red", "2022-7"],
+  const TABS = [["paire", "Accueil 2022-7"], ["vue", "Par switch"], ["trad", "Traductions"],
                 ["journal", "Journal"], ["captures", "Captures"], ["reglages", "Réglages"]];
   const ETATS = ["nat_ko", "lost", "multi", "hw_missing", "ok", "idle"];
   const LIB = { nat_ko: "NAT en échec", lost: "Entrée perdue", multi: "Deux émetteurs",
@@ -53,6 +56,22 @@
   }
   const pill = (etat, txt) => '<span class="nat-pill ' + SEV[etat] + '">' + esc(txt || LIB[etat]) + "</span>";
   const cur = () => (overview && overview.sources || []).find((s) => s.id === curId) || null;
+  const nomDe = (g) => noms[g] || null;
+  const nomTr = (t) => nomDe(t.in_group) || t.outputs.map((o) => nomDe(o.group)).find(Boolean) || null;
+  const nomHtml = (n) => n ? '<div class="nat-name">' + esc(n.name) + (n.detail ? ' <span>' + esc(n.detail) + "</span>" : "") + "</div>" : "";
+
+  async function loadNames(groupes) {
+    const manquants = [...new Set(groupes)].filter((g) => g && !(g in noms));
+    if (!manquants.length) return;
+    manquants.forEach((g) => { noms[g] = null; });       // pas de seconde demande pour une adresse inconnue du plan
+    for (let i = 0; i < manquants.length; i += 300) {
+      const lot = manquants.slice(i, i + 300);
+      try {
+        const r = await BT.fetchJSON("/api/tools/mcast_ipam/names?groups=" + encodeURIComponent(lot.join(",")));
+        Object.assign(noms, (r && r.names) || {});
+      } catch (e) { return; }                            // pas d'accès au plan : on reste en adresses
+    }
+  }
   const pb = (c) => c ? c.nat_ko + c.lost + c.multi + c.hw_missing : 0;
 
   // ── Données ──
@@ -71,6 +90,11 @@
     const s = cur();
     if (!s || !s.has_nat) return;
     try { data = await CTX.api("source/" + encodeURIComponent(curId)); } catch (e) { data = { error: e.message }; }
+    if (data && data.model) {
+      const gs = [];
+      data.model.translations.forEach((t) => { gs.push(t.in_group); t.outputs.forEach((o) => gs.push(o.group)); });
+      await loadNames(gs);
+    }
     if (s.kind === "switch") {
       try { hist = await CTX.api("history?sid=" + encodeURIComponent(curId)); } catch (e) { hist = null; }
     }
@@ -112,7 +136,7 @@
     try {
       if (tab === "vue") c.innerHTML = vueHtml();
       else if (tab === "trad") c.innerHTML = tradHtml();
-      else if (tab === "red") { c.innerHTML = redHtml(); loadPairDetail(); }
+      else if (tab === "paire") { c.innerHTML = paireHtml(); bindPaires(); loadPairHome(); }
       else if (tab === "journal") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadJournal(); }
       else if (tab === "captures") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadCaptures(); }
       else if (tab === "reglages") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadReglages(); }
@@ -270,7 +294,7 @@
     const q = filt.q.trim().toLowerCase();
     let list = m.translations.filter((t) => (!filt.states.size || filt.states.has(t.state)) &&
       (!filt.family || famOf(t).includes(filt.family)) &&
-      (!q || JSON.stringify([t.key, t.outputs.map((o) => o.group + " " + o.oif_name), t.candidates.map((c) => c.source + " " + (c.name || ""))]).toLowerCase().includes(q)));
+      (!q || JSON.stringify([t.key, nomTr(t), t.outputs.map((o) => o.group + " " + o.oif_name), t.candidates.map((c) => c.source + " " + (c.name || ""))]).toLowerCase().includes(q)));
     list.sort((x, y) => ETATS.indexOf(x.state) - ETATS.indexOf(y.state));
     const total = list.length;
     list = list.slice(0, filt.limit);
@@ -286,12 +310,13 @@
       const em = act.length ? act.map((c) => '<div>' + esc(c.name || "") + ' <span class="nat-mono muted">' + esc(c.source) + "</span></div>").join("") :
         '<span class="muted">aucun · ' + t.candidates.length + " candidat" + (t.candidates.length > 1 ? "s" : "") + "</span>";
       const outs = '<div class="nat-out">' + t.outputs.map((o) => '<span class="nat-o"><span class="d ' + o.state + '"></span><span class="nat-mono">' +
-        esc(o.group) + (o.udp_dst ? ":" + o.udp_dst : "") + "</span><small>" + esc(o.oif_name || o.oif_short || "local") +
+        esc(o.group) + (o.udp_dst ? ":" + o.udp_dst : "") + "</span><small>" +
+        (nomDe(o.group) && nomDe(o.group) !== nomTr(t) ? esc(nomDe(o.group).name) + " · " : "") + esc(o.oif_name || o.oif_short || "local") +
         (o.receivers ? " · " + o.receivers + " OIF" : "") + "</small></span>").join("") + "</div>";
       const ouvert = filt.open === t.key;
       return '<tr class="nat-row' + (ouvert ? " sel" : "") + '" data-k="' + esc(t.key) + '"><td>' + pill(t.state) +
         (since[t.key] && t.state !== "idle" ? '<div class="muted" style="font-size:.75rem;margin-top:3px">depuis ' + duree(since[t.key]) + "</div>" : "") +
-        '</td><td class="m">' + esc(t.in_group) + '</td><td>' + em + '</td><td class="arrow">→</td><td>' + outs + "</td></tr>" +
+        '</td><td class="m">' + esc(t.in_group) + nomHtml(nomTr(t)) + '</td><td>' + em + '</td><td class="arrow">→</td><td>' + outs + "</td></tr>" +
         (ouvert ? '<tr class="nat-detail"><td colspan="5">' + detailHtml(t) + "</td></tr>" : "");
     }).join("");
     return '<div class="nat-filters">' + chips + fams + '<input type="search" id="nat-q" placeholder="Groupe, serveur, voisin…" value="' + esc(filt.q) + '">' +
@@ -319,69 +344,225 @@
   }
 
   // ── 2022-7 ──
-  function redHtml() {
+  // ── Accueil 2022-7 : la paire d'abord ──
+  const nomSrc = (id) => ((overview.sources || []).find((x) => x.id === id) || {}).name || id;
+  const pairLabel = (p) => p.label || nomSrc(p.a) + " / " + nomSrc(p.b);
+  const ETIQ = { both: ["good", "Deux jambes"], single: ["warning", "Une seule jambe"], none: ["critical", "Aucune jambe"], idle: ["neutral", "Inutilisée"] };
+  const CLE = { in: "même groupe d'entrée", out: "même groupe de sortie", suffix: "même fin d'adresse", rank: "même rang dans la famille" };
+  const gbps = (b) => b == null ? "—" : (b / 1e9).toFixed(2).replace(".", ",");
+  const pct = (e) => (e > 0.005 ? "+" : e < -0.005 ? "−" : "") + Math.abs(e).toFixed(1).replace(".", ",") + " %";
+
+  function paireHtml() {
     const pairs = overview.pairs || [];
-    const srcs = (overview.sources || []).filter((s) => s.has_nat);
-    const nom = (id) => ((overview.sources || []).find((s) => s.id === id) || {}).name || id;
-    let h = '<div class="nat-note">En 2022-7, deux switchs font chacun le NAT d\'une jambe. Une paire associe leurs traductions et montre, pour chaque flux, ' +
-      "si les deux jambes tiennent. Une jambe illisible (switch injoignable) n'est jamais comptée comme morte.</div>";
-    if (!pairs.length) h += '<div class="nat-card"><span class="nat-h">Aucune paire déclarée</span><span class="nat-note">' +
-      (srcs.length < 2 ? "Il faut deux sources avec du NAT (switchs ou captures). Une seule est connue pour l'instant." : "Déclarez la paire ci-dessous.") + "</span></div>";
-    else {
-      if (!pairSel || !pairs.some((p) => p.pair.id === pairSel)) pairSel = pairs[0].pair.id;
-      h += '<div class="nat-chips">' + pairs.map((p) => {
-        const c = p.counts || {};
-        const s = !p.ready ? "neutral" : c.none ? "critical" : c.single ? "warning" : "good";
-        return '<button type="button" class="nat-pill ' + s + (p.pair.id === pairSel ? "" : " off") + '" data-pair="' + esc(p.pair.id) + '">' +
-          esc(p.pair.label || nom(p.pair.a) + " / " + nom(p.pair.b)) + (p.ready ? " · " + (c.both || 0) + " doublées" : " · en attente") + "</button>";
-      }).join("") + "</div>" + '<div id="nat-pair-detail"><div class="meta">Chargement…</div></div>';
-    }
-    const opts = (sel) => srcs.map((s) => '<option value="' + esc(s.id) + '"' + (s.id === sel ? " selected" : "") + ">" + esc(s.name) + "</option>").join("");
-    const sugg = (overview.suggestions || []).map((s) => '<div class="nat-actions"><span>' + esc(nom(s.a)) + " + " + esc(nom(s.b)) + " — " + s.matched +
-      ' traductions appariées</span><button class="btn btn-green" type="button" data-sugg="' + esc(s.a + "|" + s.b + "|" + s.key) + '">Déclarer cette paire</button></div>').join("");
-    h += '<div class="nat-card"><span class="nat-h">Déclarer une paire</span>' + (sugg ? '<div class="nat-note">Paires plausibles trouvées :</div>' + sugg : "") +
+    if (!pairs.length) return gestionPairesHtml(true);
+    if (!pairSel || !pairs.some((p) => p.pair.id === pairSel)) pairSel = pairs[0].pair.id;
+    return (pairs.length > 1 ? '<div class="nat-chips">' + pairs.map((p) => {
+      const sm = p.summary || {};
+      const sv = !p.ready ? "neutral" : sm.critical ? "critical" : sm.warning ? "warning" : "good";
+      return '<button type="button" class="nat-pill ' + sv + (p.pair.id === pairSel ? "" : " off") + '" data-pair="' + esc(p.pair.id) + '">' +
+        esc(pairLabel(p.pair)) + (p.ready ? (sm.incidents ? " · " + sm.incidents + " incident" + (sm.incidents > 1 ? "s" : "") : " · OK") : " · en attente") + "</button>";
+    }).join("") + "</div>" : "") + '<div id="nat-pair-home" class="nat-content"><div class="meta">Chargement…</div></div>';
+  }
+
+  function gestionPairesHtml(seul) {
+    const srcs = (overview.sources || []).filter((x) => x.has_nat);
+    const pairs = (overview.config || {}).pairs || [];
+    const opts = (sel) => srcs.map((x) => '<option value="' + esc(x.id) + '"' + (x.id === sel ? " selected" : "") + ">" + esc(x.name) + "</option>").join("");
+    const sugg = (overview.suggestions || []).map((x) => '<div class="nat-actions" style="align-items:center"><span>' + esc(nomSrc(x.a)) + " + " + esc(nomSrc(x.b)) + " — " + x.matched +
+      ' traductions appariées (' + esc(CLE[x.key] || x.key) + ')</span><button class="btn btn-green" type="button" data-sugg="' + esc(x.a + "|" + x.b + "|" + x.key) + '">Déclarer cette paire</button></div>').join("");
+    const liste = pairs.map((p) => '<div class="nat-actions" style="align-items:center"><span><b>' + esc(pairLabel(p)) + '</b> <span class="muted">A = ' + esc(nomSrc(p.a)) +
+      " · B = " + esc(nomSrc(p.b)) + " · " + esc(p.key === "auto" ? "appariement automatique" : CLE[p.key] || p.key) + '</span></span><button class="btn btn-red" type="button" data-pdel="' + esc(p.id) + '">Retirer</button></div>').join("");
+    const corps = (seul ? '<div class="nat-note">En 2022-7, deux switchs font chacun le NAT d\'une jambe. Déclarez la paire : l\'accueil montrera alors les deux jambes côte à côte, lien par lien, ' +
+      "et alertera si leurs débits divergent." + (srcs.length < 2 ? " Il faut deux sources avec du NAT (switchs ou captures) ; une seule est connue pour l'instant." : "") + "</div>" : "") +
+      liste + (sugg ? '<div class="nat-note">Paires plausibles :</div>' + sugg : "") +
       '<div class="nat-form"><label for="nat-pa">Jambe A</label><select id="nat-pa">' + opts(srcs[0] && srcs[0].id) + "</select>" +
       '<label for="nat-pb">Jambe B</label><select id="nat-pb">' + opts(srcs[1] && srcs[1].id) + "</select>" +
       '<label for="nat-pk">Apparier par</label><select id="nat-pk"><option value="auto">automatique (le plus de correspondances)</option>' +
-      '<option value="in">même groupe d\'entrée</option><option value="out">même groupe de sortie</option><option value="rank">même rang dans la famille</option></select>' +
+      Object.entries(CLE).map(([k, v]) => '<option value="' + k + '">' + esc(v) + "</option>").join("") + "</select>" +
       '<label for="nat-pl">Nom</label><input id="nat-pl" type="text" placeholder="ex. Spine A / Spine B"></div>' +
-      '<div class="nat-actions"><button class="btn btn-green" id="nat-padd" type="button">Ajouter la paire</button></div></div>';
-    return h;
+      '<div class="nat-actions"><button class="btn btn-green" id="nat-padd" type="button">Ajouter la paire</button></div>';
+    return seul ? '<div class="nat-card"><span class="nat-h">Déclarer une paire 2022-7</span>' + corps + "</div>" :
+      '<details class="nat-card"><summary class="nat-h" style="cursor:pointer">Gérer les paires</summary>' + corps + "</details>";
   }
 
-  async function loadPairDetail() {
-    const box = $("#nat-pair-detail");
+  async function loadPairHome() {
+    const box = $("#nat-pair-home");
     if (!box || !pairSel) return;
-    let r;
-    try { r = await CTX.api("pair/" + encodeURIComponent(pairSel)); } catch (e) { box.innerHTML = '<div class="nat-err">' + esc(e.message) + "</div>"; return; }
-    if (!EL || tab !== "red") return;
-    const nom = (id) => ((overview.sources || []).find((s) => s.id === id) || {}).name || id;
-    if (!r.ready) { box.innerHTML = '<div class="nat-note">Les deux jambes n\'ont pas encore été relevées.</div>'; return; }
-    const c = r.counts, legSev = (st) => SEV[st] || "neutral";
-    const ordre = { none: 0, single: 1, both: 2, idle: 3 };
-    const lignes = r.pairs.slice().sort((a, b) => ordre[a.state] - ordre[b.state]);
-    const etiquette = { both: ["good", "Deux jambes"], single: ["warning", "Une seule jambe"], none: ["critical", "Aucune jambe"], idle: ["neutral", "Inutilisée"] };
-    box.innerHTML = '<div class="nat-card"><div class="nat-chips">' +
-      ["none", "single", "both", "idle"].filter((k) => c[k]).map((k) => '<span class="nat-pill ' + etiquette[k][0] + '">' + etiquette[k][1] + " · " + c[k] + "</span>").join("") +
-      '</div><span class="nat-note">Appariement : ' + esc({ in: "même groupe d'entrée", out: "même groupe de sortie", rank: "même rang dans la famille" }[r.key_used] || r.key_used) +
-      ". " + (r.only_a.length ? r.only_a.length + " traduction(s) sans jumelle sur " + esc(nom(r.pair.a)) + ". " : "") +
-      (r.only_b.length ? r.only_b.length + " sur " + esc(nom(r.pair.b)) + ". " : "") +
-      (r.a_error || r.b_error ? "Relevé en échec sur une jambe : son dernier état connu est affiché." : "") + "</span>" +
-      '<div class="nat-twins" aria-label="Une colonne par flux : A en haut, B en bas">' + r.pairs.map((p) =>
-        '<span class="nat-twin" title="' + esc(p.a + " / " + p.b + " — " + etiquette[p.state][1]) + '"><i class="' + legSev(p.a_state) + '"></i><i class="' +
-        legSev(p.b_state) + '"></i></span>').join("") + '</div><span class="nat-note">Une colonne par flux : jambe A en haut, jambe B en bas.</span>' +
-      '<div class="nat-tblwrap"><table class="nat-tbl"><thead><tr><th>Jambes</th><th>' + esc(nom(r.pair.a)) + "</th><th>" + esc(nom(r.pair.b)) + "</th><th></th></tr></thead><tbody>" +
-      lignes.slice(0, 400).map((p) => '<tr><td><span class="nat-legs"><span class="nat-leg ' + legSev(p.a_state) + '">A</span><span class="nat-leg ' + legSev(p.b_state) + '">B</span></span></td>' +
-        '<td><span class="nat-mono">' + esc(p.a) + " → " + esc(p.a_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.a_state]) + (p.a_name ? " · " + esc(p.a_name) : "") + "</div></td>" +
-        '<td><span class="nat-mono">' + esc(p.b) + " → " + esc(p.b_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.b_state]) + (p.b_name ? " · " + esc(p.b_name) : "") + "</div></td>" +
-        "<td>" + '<span class="nat-pill ' + etiquette[p.state][0] + '">' + etiquette[p.state][1] + "</span></td></tr>").join("") +
-      "</tbody></table></div>" +
-      '<div class="nat-actions"><button class="btn btn-red" type="button" id="nat-pdel">Retirer cette paire</button></div></div>';
-    $("#nat-pdel").onclick = async () => {
-      const cfg = overview.config;
-      await saveConfig({ pairs: (cfg.pairs || []).filter((p) => p.id !== pairSel) });
-      pairSel = null; toast("Paire retirée"); await loadOverview(); render();
+    let r, h;
+    try {
+      [r, h] = await Promise.all([CTX.api("pair/" + encodeURIComponent(pairSel)),
+        CTX.api("history?sid=" + encodeURIComponent("pair:" + pairSel)).catch(() => null)]);
+    } catch (e) { box.innerHTML = '<div class="nat-err">' + esc(e.message) + "</div>"; return; }
+    if (!EL || tab !== "paire") return;
+    if (!r.ready) { box.innerHTML = '<div class="nat-note">Les deux jambes n\'ont pas encore été relevées.</div>' + gestionPairesHtml(false); bindPaires(); return; }
+    await loadNames(r.pairs.flatMap((p) => [p.a, p.b, ...p.a_out, ...p.b_out]));
+    if (!EL || tab !== "paire") return;
+    box.innerHTML = tuilesHtml(r) + synoptiqueHtml(r) + liensJumelesHtml(r, h) +
+      '<div class="nat-grid2">' + bandesHtml(r) + incidentsHtml(r) + "</div>" + fluxParFluxHtml(r) + gestionPairesHtml(false);
+    bindPaires();
+    box.querySelectorAll("[data-twin]").forEach((el) => el.onclick = () => {
+      const [cote, k] = el.dataset.twin.split("|");
+      curId = cote === "b" ? r.pair.b : r.pair.a; renderSelect();
+      loadSource().then(() => ouvrir(k));
+    });
+  }
+
+  function tuilesHtml(r) {
+    const sm = r.summary;
+    const tuile = (cls, titre, val, sous) => '<div class="nat-tile ' + cls + '"><span class="nat-h">' + titre + '</span><span class="big">' + val + '</span><span class="sub">' + sous + "</span></div>";
+    return '<div class="nat-tiles">' +
+      tuile(sm.critical ? "crit" : sm.warning ? "warn" : "ok", "État de la paire", sm.incidents ? sm.incidents + " incident" + (sm.incidents > 1 ? "s" : "") : "Tout tient",
+        sm.incidents ? sm.critical + " critique · " + sm.warning + " attention" : "deux jambes saines") +
+      tuile(sm.single || sm.none ? "warn" : "", "Flux doublés", sm.both + ' <small>/ ' + sm.used + " utilisés</small>",
+        (sm.single ? sm.single + " sur une seule jambe" : "aucun sur une seule jambe") + (sm.none ? " · " + sm.none + " sur aucune" : "")) +
+      tuile(sm.links_judged && sm.links_sym < sm.links_judged ? "warn" : "", "Liens symétriques", sm.links_sym + " <small>/ " + sm.links_judged + "</small>",
+        "tolérance ±" + String(sm.asym_pct).replace(".", ",") + " % pendant " + ((overview.config || {}).grace_polls || 2) + " relevés") +
+      tuile(sm.legs_read < 2 ? "crit" : "", "Jambes", sm.legs_read + " <small>/ 2 lues</small>",
+        "relevé le plus ancien : " + age(Math.min(r.legs.a.at || 0, r.legs.b.at || 0) || null)) + "</div>";
+  }
+
+  function ports(r) {
+    const vus = {}, res = [];
+    r.links.forEach((l) => {
+      const k = l.a_if + "|" + l.b_if;
+      if (!vus[k]) { vus[k] = { a_if: l.a_if_short, b_if: l.b_if_short, a_name: l.a_name, b_name: l.b_name }; res.push(vus[k]); }
+      vus[k][l.dir] = l;
+    });
+    return res;
+  }
+
+  function synoptiqueHtml(r) {
+    const ps = ports(r), n = Math.max(1, ps.length);
+    const fautif = (l, cote) => l && l.state === "asym" && (!l.causes.length || l.causes.some((c) => c.missing === cote));
+    const jambe = (cote, o) => {
+      const L = r.legs[cote], c = L.counts || {};
+      let h = '<div class="nat-syn-wire" style="grid-column:2;grid-row:' + (o + 1) + " / span " + n + '"><span class="ln"></span></div>' +
+        '<div class="nat-syn-card leg-' + cote + '" style="grid-column:3;grid-row:' + (o + 1) + " / span " + n + '"><span><b>Spine ' + cote.toUpperCase() + "</b> " +
+        '<span class="nat-mono muted" style="font-size:.78rem">' + esc(L.hostname || L.name) + "</span></span>" +
+        '<span class="muted" style="font-size:.82rem">' + (c.ok || 0) + " traductions OK" + (L.emitters ? " · " + L.emitters_live + " émetteurs actifs" : "") + "</span>" +
+        (pb(c) ? '<span style="font-size:.82rem;color:var(--nat-crit)">' + pb(c) + " en défaut</span>" : "") + "</div>";
+      ps.forEach((p, i) => {
+        const tx = p.tx, rx = p.rx, mal = fautif(tx, cote) || fautif(rx, cote);
+        const ecarts = [tx, rx].filter((l) => l && l.state === "asym").map((l) => "écart " + pct(l.ecart_pct));
+        const v = (l) => l ? (cote === "a" ? l.a_bps : l.b_bps) : null;
+        const inconnu = !tx || tx.state === "unknown";
+        h += '<div class="nat-syn-link ' + (inconnu ? "idle" : mal ? "warn" : "ok") + '" style="grid-column:4;grid-row:' + (o + i + 1) + '">' +
+          '<span class="lbl nat-mono">' + (inconnu ? "débit non relevé" : "↗ " + gbps(v(tx)) + " · ↙ " + gbps(v(rx)) + " Gb/s" + (mal && ecarts.length ? " · " + ecarts.join(" / ") : "")) + "</span>" +
+          '<span class="ln"></span></div>' +
+          '<div class="nat-syn-card' + (mal ? " warn" : "") + '" style="grid-column:5;grid-row:' + (o + i + 1) + '"><span><b>' + esc((cote === "a" ? p.a_name : p.b_name) || "?") +
+          '</b></span><span class="nat-mono muted" style="font-size:.78rem">' + esc(cote === "a" ? p.a_if : p.b_if) + "</span></div>";
+      });
+      return h;
     };
+    const A = r.legs.a, B = r.legs.b;
+    return '<section class="nat-card"><span class="nat-h">Les deux jambes · trait plein = symétrique, pointillé orange = écart</span>' +
+      '<div class="nat-syn" style="grid-template-rows:repeat(' + 2 * n + ', minmax(64px, auto))">' +
+      '<div class="nat-syn-card" style="grid-column:1;grid-row:1 / span ' + 2 * n + '"><span><b>Émetteurs locaux</b></span><span class="muted" style="font-size:.82rem">' +
+      Math.max(A.emitters, B.emitters) + " possibles</span>" + '<span style="font-size:.82rem">actifs : A ' + A.emitters_live + " · B " + B.emitters_live + "</span></div>" +
+      jambe("a", 0) + jambe("b", n) + "</div></section>";
+  }
+
+  function liensJumelesHtml(r, h) {
+    if (!r.links.length) return '<div class="nat-note">Aucun lien NAT apparié entre les deux jambes (ports de bouclage non déclarés).</div>';
+    const seuil = r.summary.asym_pct, R = Math.max(8, Math.ceil(seuil * 4));
+    const pos = (e) => ((Math.max(-R, Math.min(R, e)) + R) / (2 * R) * 100).toFixed(1) + "%";
+    const series = (h && h.links) || {};
+    const carte = (l) => {
+      const ps = l.state === "asym" ? "warning" : l.state === "sym" ? "good" : "neutral";
+      const etat = { asym: "Asymétrique", sym: "Symétrique", idle: "Au repos", unknown: "Non relevé" }[l.state];
+      const voisin = l.a_name === l.b_name ? l.a_name : l.a_name + " / " + l.b_name;
+      const titre = (l.dir === "tx" ? "Vers " : "Depuis ") + (voisin || l.a_if_short) + (l.dir === "tx" ? " · sortant" : " · entrant");
+      const route = (cote) => {
+        const L = r.legs[cote], itf = cote === "a" ? l.a_if_short : l.b_if_short, vz = cote === "a" ? l.a_name : l.b_name;
+        return l.dir === "tx" ? esc(L.hostname || L.name) + " " + esc(itf) + " → " + esc(vz) : esc(vz) + " → " + esc(L.hostname || L.name) + " " + esc(itf);
+      };
+      let jauge = "";
+      if (l.ecart_pct != null) {
+        const pts = (series[l.key] || []).slice(-120).map((p) => p[1] ? (p[2] - p[1]) / p[1] * 100 : 0);
+        const y = (e) => (22 - Math.max(-R, Math.min(R, e)) / R * 20).toFixed(1);
+        const d = pts.length > 1 ? "M" + pts.map((e, i) => (i / (pts.length - 1) * 300).toFixed(1) + " " + y(e)).join(" L") : "";
+        jauge = '<div class="nat-gauge-h"><span>B − A</span><span class="nat-mono" style="color:' + COUL[ps] + ';font-weight:600">' + pct(l.ecart_pct) +
+          (l.state === "asym" ? " · " + (l.delta_bps < 0 ? "−" : "+") + gbps(Math.abs(l.delta_bps)) + " Gb/s" : "") + "</span></div>" +
+          '<div class="nat-gauge"><span class="band" style="left:' + pos(-seuil) + ";width:" + (seuil / R * 100).toFixed(2) + '%"></span><span class="zero"></span>' +
+          '<span class="needle" style="left:' + pos(l.ecart_pct) + ";background:" + COUL[ps] + '"></span></div>' +
+          '<div class="nat-gauge-t nat-mono"><span>−' + R + " %</span><span>0</span><span>+" + R + " %</span></div>" +
+          (d ? '<span class="muted" style="font-size:.78rem">Écart sur la dernière heure · bande verte = tolérance</span>' +
+            '<svg class="nat-espark" viewBox="0 0 300 44" preserveAspectRatio="none" aria-label="Écart B − A sur la dernière heure">' +
+            '<rect x="0" y="' + y(seuil) + '" width="300" height="' + (seuil / R * 40).toFixed(1) + '" class="bandr"></rect>' +
+            '<line x1="0" y1="22" x2="300" y2="22" class="axe" vector-effect="non-scaling-stroke"></line>' +
+            '<path d="' + d + '" fill="none" style="stroke:' + COUL[ps] + '" stroke-width="2" vector-effect="non-scaling-stroke"></path></svg>' : "");
+      } else {
+        jauge = '<span class="nat-note">' + (l.state === "idle" ? "Trafic sous le plancher de " + ((overview.config || {}).asym_floor_mbps || 100) + " Mb/s : écart non jugé." : "Débit non relevé sur au moins une jambe.") + "</span>";
+      }
+      const causes = l.causes.length ? '<div class="nat-note">Cause probable : ' + l.causes.slice(0, 4).map((c) => {
+        const n = nomDe(c.a) || nomDe(c.b);
+        return '<span class="nat-mono">' + esc(c.missing === "b" ? c.b : c.a) + "</span>" + (n ? " (" + esc(n.name) + ")" : "") + " absent sur " + c.missing.toUpperCase();
+      }).join(", ") + (l.causes.length > 4 ? "…" : "") + "</div>" : "";
+      return '<article class="nat-lcard ' + ps + '"><div class="nat-actions" style="align-items:center"><b>' + esc(titre) + '</b><span class="nat-spacer"></span>' + pill(ps === "good" ? "ok" : ps === "warning" ? "multi" : "idle", etat) + "</div>" +
+        '<div class="nat-legrows"><span class="nat-leg2 a">A</span><span class="r">' + route("a") + '</span><span class="nat-mono v">' + gbps(l.a_bps) + " Gb/s</span>" +
+        '<span class="nat-leg2 b">B</span><span class="r">' + route("b") + '</span><span class="nat-mono v">' + gbps(l.b_bps) + " Gb/s</span></div>" + jauge + causes + "</article>";
+    };
+    const ordre = { asym: 0, sym: 1, idle: 2, unknown: 3 };
+    return '<section style="display:flex;flex-direction:column;gap:10px"><span class="nat-h">Liens 2022-7 · ce que B porte par rapport à A</span>' +
+      '<div class="nat-lcards">' + r.links.slice().sort((a, b) => ordre[a.state] - ordre[b.state] || (a.dir === "tx" ? -1 : 1)).map(carte).join("") + "</div>" +
+      '<span class="nat-note">Débit réel lu sur chaque port (moyenne 30 s), cumulé sur le lien : il n\'existe pas de débit par flux sur ces switchs. Les deux jambes portent les mêmes flux : leurs débits doivent coïncider.</span></section>';
+  }
+
+  function bandesHtml(r) {
+    const fams = {};
+    r.pairs.forEach((p) => {
+      const k = (p.dir === "egress" ? "Sortant " : "Entrant ") + (p.mode || "");
+      (fams[k] = fams[k] || []).push(p);
+    });
+    const legSev = (st) => SEV[st] || "neutral";
+    return '<section class="nat-card"><span class="nat-h">Flux par jambe · A en haut, B en bas</span>' + Object.entries(fams).map(([k, ps]) => {
+      const c = { both: 0, single: 0, none: 0, idle: 0 };
+      ps.forEach((p) => c[p.state]++);
+      const res = [c.both + " doublés", c.single ? c.single + " sur une seule jambe" : "", c.none ? c.none + " sur aucune" : "", c.idle ? c.idle + " inutilisés" : ""].filter(Boolean).join(" · ");
+      return '<div style="display:flex;flex-direction:column;gap:5px"><div style="font-size:.85rem"><b>' + esc(k) + '</b> <span class="muted">' + esc(res) + "</span></div>" +
+        '<div class="nat-twins">' + ps.map((p) => {
+          const n = nomDe(p.a) || nomDe(p.b);
+          return '<button type="button" class="nat-twin" data-twin="a|' + esc(p.a) + '" title="' +
+            esc(p.a + (p.b !== p.a ? " / " + p.b : "") + (n ? " — " + n.name : "") + " — " + ETIQ[p.state][1]) + '"><i class="' + legSev(p.a_state) + '"></i><i class="' + legSev(p.b_state) + '"></i></button>';
+        }).join("") + "</div></div>";
+    }).join("") + "</section>";
+  }
+
+  function incidentsHtml(r) {
+    const cle = (k) => {
+      const [a, b] = k, n = nomDe(a) || nomDe(b);
+      return '<span class="nat-mono">' + esc(a === b ? a : a + " / " + b) + "</span>" + (n ? " " + esc(n.name) : "");
+    };
+    return '<section class="nat-card"><span class="nat-h">Incidents en cours</span>' + (r.incidents.length ? r.incidents.map((i) =>
+      '<div class="nat-inc ' + i.severity + '"><span class="nat-pill ' + i.severity + '">' + (i.severity === "critical" ? "Critique" : "Attention") + "</span><div><b>" + esc(i.title) + "</b>" +
+      (i.detail ? '<div class="muted" style="font-size:.84rem">' + esc(i.detail) + "</div>" : "") +
+      (i.keys && i.keys.length ? '<div style="font-size:.82rem;margin-top:3px">' + i.keys.slice(0, 6).map(cle).join(" · ") + (i.keys.length > 6 ? " · +" + (i.keys.length - 6) : "") + "</div>" : "") +
+      "</div></div>").join("") : '<span class="nat-note">Aucun incident : chaque flux utilisé tient sur ses deux jambes, et les liens sont symétriques.</span>') + "</section>";
+  }
+
+  function fluxParFluxHtml(r) {
+    const legSev = (st) => SEV[st] || "neutral";
+    const ordre = { none: 0, single: 1, both: 2, idle: 3 };
+    const nomP = (k, outs) => nomDe(k) || outs.map(nomDe).find(Boolean) || null;
+    const lignes = r.pairs.slice().sort((a, b) => ordre[a.state] - ordre[b.state]);
+    return '<details class="nat-card"><summary class="nat-h" style="cursor:pointer">Flux par flux · ' + r.pairs.length + " paires · " + esc(CLE[r.key_used] || r.key_used) + "</summary>" +
+      (r.only_a.length || r.only_b.length ? '<span class="nat-note">' + (r.only_a.length ? r.only_a.length + " traduction(s) sans jumelle sur " + esc(nomSrc(r.pair.a)) + ". " : "") +
+        (r.only_b.length ? r.only_b.length + " sur " + esc(nomSrc(r.pair.b)) + "." : "") + "</span>" : "") +
+      '<div class="nat-tblwrap"><table class="nat-tbl"><thead><tr><th>Jambes</th><th>' + esc(nomSrc(r.pair.a)) + "</th><th>" + esc(nomSrc(r.pair.b)) + "</th><th></th></tr></thead><tbody>" +
+      lignes.slice(0, 400).map((p) => '<tr><td><span class="nat-legs"><span class="nat-leg ' + legSev(p.a_state) + '">A</span><span class="nat-leg ' + legSev(p.b_state) + '">B</span></span></td>' +
+        '<td><span class="nat-mono">' + esc(p.a) + " → " + esc(p.a_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.a_state]) + (p.a_name ? " · " + esc(p.a_name) : "") + "</div>" + nomHtml(nomP(p.a, p.a_out)) + "</td>" +
+        '<td><span class="nat-mono">' + esc(p.b) + " → " + esc(p.b_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.b_state]) + (p.b_name ? " · " + esc(p.b_name) : "") + "</div>" + nomHtml(nomP(p.b, p.b_out)) + "</td>" +
+        '<td><span class="nat-pill ' + ETIQ[p.state][0] + '">' + ETIQ[p.state][1] + "</span></td></tr>").join("") + "</tbody></table></div></details>";
+  }
+
+  function bindPaires() {
+    EL.querySelectorAll("[data-pdel]").forEach((b) => b.onclick = async () => {
+      if (!confirm("Retirer cette paire ? Les switchs restent surveillés un par un.")) return;
+      try {
+        await saveConfig({ pairs: (overview.config.pairs || []).filter((p) => p.id !== b.dataset.pdel) });
+        pairSel = null; toast("Paire retirée"); await loadOverview(); renderTabs(); render();
+      } catch (e) { if (!e.rightsShown) toast(e.message, "error"); }
+    });
   }
 
   async function saveConfig(patch) {
@@ -392,7 +573,7 @@
   async function ajouterPaire(a, b, key, label) {
     if (!a || !b || a === b) { toast("Choisissez deux sources différentes", "error"); return; }
     const pairs = (overview.config.pairs || []).concat([{ a, b, key: key || "auto", label: label || "" }]);
-    try { await saveConfig({ pairs }); toast("Paire déclarée"); await loadOverview(); render(); }
+    try { await saveConfig({ pairs }); toast("Paire déclarée"); await loadOverview(); tab = "paire"; renderTabs(); render(); }
     catch (e) { if (!e.rightsShown) toast(e.message, "error"); }
   }
 
@@ -531,7 +712,9 @@
     const box = $("#nat-tip");
     if (!t) return;
     const act = t.candidates.filter((c) => c.state === "live");
+    const nt = nomTr(t);
     box.innerHTML = "<div><b>" + esc(t.in_group) + "</b> " + pill(t.state) + "</div>" +
+      (nt ? "<div>" + esc(nt.name) + (nt.detail ? ' <span class="muted">' + esc(nt.detail) + "</span>" : "") + "</div>" : "") +
       '<div class="muted">' + (act.length ? "émis par " + esc(act.map((c) => c.name || c.source).join(", ")) : "aucun émetteur présent") + "</div>" +
       t.outputs.map((o) => "<div>→ <b>" + esc(o.group) + "</b> " + esc(FLUX[o.state]) + (o.oif_name ? " · " + esc(o.oif_name) : "") + "</div>").join("") +
       (t.issues.length ? '<div style="color:var(--nat-crit)">' + esc(t.issues[0]) + "</div>" : "");
@@ -548,21 +731,24 @@
     try {
       if (force) { await CTX.api("poll", { method: "POST", body: {} }); await new Promise((r) => setTimeout(r, 2500)); }
       await loadOverview(); await loadSource();
-      if (["vue", "trad", "red"].includes(tab)) render(); else renderFresh();
+      if (tab === null) { tab = (overview.pairs || []).length ? "paire" : "vue"; renderTabs(); }
+      if (["vue", "trad", "paire"].includes(tab)) render(); else renderFresh();
     } catch (e) {
       if (EL) $("#nat-content").innerHTML = '<div class="nat-err">' + esc(e.message) + "</div>";
     }
   }
 
   function mount(el, ctx) {
-    EL = el; CTX = ctx; overview = null; data = null; tab = "vue"; curId = null;
+    EL = el; CTX = ctx; overview = null; data = null; tab = null; curId = null;
     filt = { states: new Set(), family: "", q: "", open: null, limit: 150 };
+    noms = {};
     renderTabs();
     $("#nat-refresh").onclick = () => refresh(true);
     refresh(false);
     // Rafraîchissement discret : seulement sur les vues d'état, et pas dans un onglet caché.
     timer = setInterval(() => {
-      if (!EL || document.hidden || !["vue", "red"].includes(tab)) return;
+      if (!EL || document.hidden || !["vue", "paire"].includes(tab)) return;
+      if (tab === "paire" && EL.querySelector("details[open]")) return;   // ne pas refermer ce qu'on lit
       if (tab === "trad" && filt.open) return;
       refresh(false);
     }, 20000);

@@ -35,6 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import nat_model as M
+import nat_pair as NP
 import nat_parse as P
 
 try:
@@ -72,6 +73,9 @@ DEFAULT_CONFIG = {
     # Au-delà de ce nombre de traductions touchées dans une même passe, UN événement
     # récapitulatif plutôt qu'une rafale (une cause = une alerte).
     "burst": 3,
+    # 2022-7 : écart toléré entre les débits des deux jambes d'un même lien, et plancher
+    # sous lequel on ne juge pas (au repos, le moindre écart fait un pourcentage énorme).
+    "asym_pct": 1.0, "asym_floor_mbps": 100,
     "disabled": [],            # switchs à ne pas interroger
     "pairs": [],               # 2022-7 : [{id, label, a, b, key}]
 }
@@ -115,12 +119,20 @@ def _save_config(patch):
         except (TypeError, ValueError):
             c[k] = DEFAULT_CONFIG[k]
     c["poll_seconds"] = max(15, c["poll_seconds"])
+    try:
+        c["asym_pct"] = min(50.0, max(0.1, float(c["asym_pct"])))
+    except (TypeError, ValueError):
+        c["asym_pct"] = DEFAULT_CONFIG["asym_pct"]
+    try:
+        c["asym_floor_mbps"] = max(0, int(c["asym_floor_mbps"]))
+    except (TypeError, ValueError):
+        c["asym_floor_mbps"] = DEFAULT_CONFIG["asym_floor_mbps"]
     paires = []
     for p in c.get("pairs") or []:
         if isinstance(p, dict) and p.get("a") and p.get("b") and p["a"] != p["b"]:
             paires.append({"id": p.get("id") or uuid.uuid4().hex[:8], "label": str(p.get("label") or ""),
                            "a": str(p["a"]), "b": str(p["b"]),
-                           "key": p.get("key") if p.get("key") in ("auto", "in", "out", "rank") else "auto"})
+                           "key": p.get("key") if p.get("key") in ("auto", "in", "out", "suffix", "rank") else "auto"})
     c["pairs"] = paires
     c["disabled"] = [str(x) for x in (c.get("disabled") or [])]
     _write_json(CONFIG_FILE, c)
@@ -227,6 +239,9 @@ def _relever(sw, cfg):
         if cache["reflect"]["rules"]:
             ifs = d.texte("show interface description") + "\n" + d.texte("show ip interface brief")
             cache["interfaces"] = P.parse_interfaces(ifs)
+            # Gardé pour le diagnostic à distance (GET /diag/<id>) : descriptions et adresses,
+            # rien de secret. Sert quand un nom de voisin manque à l'écran.
+            cache["raw_ifs"] = ifs[:20000]
         else:
             cache["interfaces"] = {}
         cache["static_at"] = now
@@ -272,10 +287,11 @@ _KIND = {"nat_ko": "NAT en échec", "lost": "Entrée perdue", "multi": "Deux ém
          "hw_missing": "Traduction absente du matériel", "clear": "Rétabli",
          "unreachable": "Switch injoignable", "reachable": "Switch de nouveau joignable",
          "leg_down": "2022-7 : une seule jambe", "pair_none": "2022-7 : les deux jambes en défaut",
-         "pair_ok": "2022-7 : les deux jambes rétablies"}
+         "pair_ok": "2022-7 : les deux jambes rétablies",
+         "asym": "2022-7 : débits asymétriques", "sym": "2022-7 : débits de nouveau symétriques"}
 _SEV = {"nat_ko": "critical", "lost": "critical", "multi": "warning", "hw_missing": "warning",
         "clear": "good", "unreachable": "critical", "reachable": "good", "leg_down": "warning",
-        "pair_none": "critical", "pair_ok": "good"}
+        "pair_none": "critical", "pair_ok": "good", "asym": "warning", "sym": "good"}
 
 
 def _load_alerts():
@@ -323,7 +339,7 @@ def _transitions(states, prefix, courants, grace):
         st = states.get(sk)
         if st is None:
             states[sk] = {"state": cur, "since": time.time(), "pending": None, "n": 0}
-            if cur in BAD or cur in ("single", "none"):
+            if cur in BAD or cur in ("single", "none", "asym"):
                 out.append((k, None, cur))
             continue
         if cur == st["state"]:
@@ -386,6 +402,33 @@ def _alerter_paires(states, cfg, noms):
                 groupes.setdefault("pair_none", []).append((k, f"{a} / {b} : aucune jambe saine"))
             elif old in ("single", "none") and new in ("both", "idle"):
                 groupes.setdefault("pair_ok", []).append((k, f"{a} / {b} : rétabli"))
+        _emettre(groupes, label, None, cfg["burst"])
+
+        # Débits des deux jambes, lien par lien : historique (courbe d'écart) et alerte.
+        an = NP.analyser(ma, mb, ap, cfg)
+        h = HIST.setdefault(f"pair:{p['id']}", {"counts": [], "links": {}})
+        t = int(time.time())
+        for l in an["links"]:
+            if l["a_bps"] is not None and l["b_bps"] is not None:
+                s_ = h["links"].setdefault(l["key"], [])
+                s_.append([t, l["a_bps"], l["b_bps"]])
+                del s_[:-MAX_POINTS]
+        idx = {l["key"]: l for l in an["links"]}
+        courants = {l["key"]: ("asym" if l["state"] == "asym" else "sym")
+                    for l in an["links"] if l["state"] in ("sym", "asym")}
+        groupes = {}
+        for k, old, new in _transitions(states, f"pairlink:{p['id']}|", courants, cfg["grace_polls"]):
+            l = idx[k]
+            sens = "sortant" if l["dir"] == "tx" else "entrant"
+            nom = f"{l['a_name'] or l['a_if_short']} / {l['b_name'] or l['b_if_short']} ({sens})"
+            if new == "asym":
+                cause = (f" — cause probable : {len(l['causes'])} flux sur une seule jambe ("
+                         + ", ".join(f"{c['a']}/{c['b']}" for c in l["causes"][:10]) + ")") if l["causes"] else ""
+                groupes.setdefault("asym", []).append((k, (
+                    f"{nom} : A {l['a_bps'] / 1e9:.2f} · B {l['b_bps'] / 1e9:.2f} Gb/s, écart "
+                    f"{l['ecart_pct']:+.1f} %{cause}").replace(".", ",")))
+            elif old == "asym":
+                groupes.setdefault("sym", []).append((k, f"{nom} : écart revenu sous le seuil"))
         _emettre(groupes, label, None, cfg["burst"])
 
 
@@ -546,8 +589,19 @@ def _paire(p):
         x["b_src"] = tb["active"]
         x["a_name"] = next((c["name"] for c in ta["candidates"] if c["state"] == "live"), None)
         x["b_name"] = next((c["name"] for c in tb["candidates"] if c["state"] == "live"), None)
-    ap.update({"pair": p, "ready": True, "a_error": (ea or {}).get("error"),
-               "b_error": (eb or {}).get("error")})
+    ea_err, eb_err = (ea or {}).get("error"), (eb or {}).get("error")
+    ap.update({"pair": p, "ready": True, "a_error": ea_err, "b_error": eb_err})
+    ap.update(NP.analyser(ma, mb, ap, _load_config(), ea_err, eb_err))
+
+    def jambe(m, e, sid):
+        emis = {c["name"] or c["source"] for t in m["translations"] if t["dir"] == "egress"
+                for c in t["candidates"]}
+        actifs = {c["name"] or c["source"] for t in m["translations"] if t["dir"] == "egress"
+                  for c in t["candidates"] if c["state"] == "live"}
+        nom = next((s["name"] for s in _sources() if s["id"] == sid), sid)
+        return {"id": sid, "name": nom, "hostname": m.get("hostname"), "counts": m["counts"],
+                "emitters": len(emis), "emitters_live": len(actifs), "at": (e or {}).get("at")}
+    ap["legs"] = {"a": jambe(ma, ea, p["a"]), "b": jambe(mb, eb, p["b"])}
     return ap
 
 
@@ -639,6 +693,13 @@ class Handler(BaseHTTPRequestHandler):
             if not p:
                 return self._send(404, {"error": "paire inconnue"})
             return self._send(200, _paire(p))
+        if len(parts) == 2 and parts[0] == "diag":
+            e = ETAT.get(parts[1]) or {}
+            c = e.get("cache") or {}
+            return self._send(200, {"interfaces_raw": c.get("raw_ifs"),
+                                    "interfaces_parsed": c.get("interfaces"),
+                                    "rules": len((c.get("reflect") or {}).get("rules") or []),
+                                    "error": e.get("error")})
         if parts == ["history"]:
             sid = (q.get("sid") or [""])[0]
             return self._send(200, HIST.get(sid) or {"counts": [], "links": {}})

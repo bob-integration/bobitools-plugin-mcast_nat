@@ -125,6 +125,9 @@ def parse_interfaces(texte):
 
     cur = None
     for ligne in (texte or "").splitlines():
+        # Les lignes de `show ip interface brief` finissent par des espaces : sans ce
+        # rstrip, elles passaient pour une description VIDE qui écrasait la vraie.
+        ligne = ligne.rstrip()
         if not ligne.strip() or ligne.startswith("---"):
             if not ligne.strip():
                 cur = None
@@ -142,6 +145,15 @@ def parse_interfaces(texte):
                 cur["addrs"].append(f"{m.group(1)}/{m.group(2)}")
             continue
         cur = None
+        # show ip interface brief : « Eth1/16  192.168.72.61  protocol-up/link-up/admin-up »
+        m = re.match(r"^((?:Eth|Lo|Po|Vlan)\S*)\s+(\d+\.\d+\.\d+\.\d+)\s+\S", ligne)
+        if m:
+            f = fiche(m.group(1))
+            if not any(a.split("/")[0] == m.group(2) for a in f["addrs"]):
+                # `brief` ne donne pas le masque : /30 est la règle des liens routés 2110,
+                # et le voisin se déduit au même titre qu'en /31 (cf. voisin_de).
+                f["addrs"].append(m.group(2) + ("/32" if m.group(1).startswith("Lo") else "/30"))
+            continue
         # show interface description : « Eth1/16  eth  100G  SRV_HOME_APP_01 »
         m = re.match(r"^((?:Eth|Lo|Po|mgmt|Vlan)\S*)\s+(eth|loopback|--|\S+)\s+(\S+)\s+(.+?)\s*$", ligne)
         if m and not ligne.startswith(("Port ", "Interface ")):
@@ -154,14 +166,6 @@ def parse_interfaces(texte):
             if d and d != "--":
                 fiche(m.group(1))["desc"] = d
             continue
-        # show ip interface brief : « Eth1/16  192.168.72.61  protocol-up/link-up/admin-up »
-        m = re.match(r"^((?:Eth|Lo|Po|Vlan)\S*)\s+(\d+\.\d+\.\d+\.\d+)\s+\S", ligne)
-        if m:
-            f = fiche(m.group(1))
-            if not any(a.split("/")[0] == m.group(2) for a in f["addrs"]):
-                # `brief` ne donne pas le masque : /30 est la règle des liens routés 2110,
-                # et le voisin se déduit au même titre qu'en /31 (cf. voisin_de).
-                f["addrs"].append(m.group(2) + "/30")
     return res
 
 

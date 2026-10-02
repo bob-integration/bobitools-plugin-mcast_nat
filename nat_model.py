@@ -99,6 +99,19 @@ def construire(cfg, interfaces, summary, nbm, fwd, rates, hostname=None):
             oif = o["static_oif"]
             hw = None
             routes = [fwd[(a["source"], g)] for a in actives if (a["source"], g) in fwd] if fwd else []
+            # Une route SANS aucune ligne Encap ne prouve rien : en mode ingress, NX-OS ne
+            # range pas la traduction sous la route d'entrée (mesuré sur spine-a/b : toutes
+            # les entrantes sortaient « absentes » à tort). On ne conclut « absente » que si la
+            # route porte des Encap et qu'aucune ne correspond.
+            if m and m.get("dir") == "ingress" and routes and not any(r.get("encaps") for r in routes):
+                # Mode ingress : la réécriture se fait À L'ENTRÉE, la route (S,G) d'origine
+                # sort directement vers les abonnés du groupe traduit (mesuré : 232.5.0.1 →
+                # Eth1/8,15,18,21 = les 4 abonnés de 239.100.124.1). Programmée = elle a des
+                # OIF quand la sortie a des abonnés ; sans abonné, rien à prouver.
+                if (e or {}).get("oifs"):
+                    hw = any(r.get("oifs") for r in routes)
+                routes = []
+            routes = [r for r in routes if r.get("encaps")]
             if routes:
                 # Vérification matérielle : l'Encap doit exister sur la route de l'émetteur
                 # ACTIF, vers ce (S',G') et ces ports. Route non relevée (capture partielle,
@@ -263,6 +276,16 @@ def apparier(modele_a, modele_b, cle="auto"):
                 for o in t["outputs"]:
                     d.setdefault(o["group"], t)
             return d
+        if cle_ == "suffix":
+            # Plan d'adressage décliné par jambe (A 239.101.3.N → 239.100.125.N, B 239.101.4.N
+            # → 239.200.125.N) : on garde le dernier octet de l'entrée et les deux derniers
+            # de chaque sortie, ce qui distingue encore les familles entre elles.
+            d = {}
+            for t in trads:
+                k = (t["dir"], t["in_group"].split(".")[-1],
+                     tuple(sorted(".".join(o["group"].split(".")[-2:]) for o in t["outputs"])))
+                d.setdefault(k, t)
+            return d
         d, rang = {}, {}
         for t in trads:
             fam = (t["dir"], t["mode"])
@@ -270,7 +293,7 @@ def apparier(modele_a, modele_b, cle="auto"):
             d[(t["dir"], rang[fam])] = t
         return d
 
-    essais = [cle] if cle in ("in", "out", "rank") else ["in", "out", "rank"]
+    essais = [cle] if cle in ("in", "out", "suffix", "rank") else ["in", "out", "suffix", "rank"]
     meilleur = None
     for c in essais:
         da, db = par(c, ta), par(c, tb)
