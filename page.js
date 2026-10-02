@@ -382,7 +382,7 @@
       '<label for="nat-pl">Nom</label><input id="nat-pl" type="text" placeholder="ex. Spine A / Spine B"></div>' +
       '<div class="nat-actions"><button class="btn btn-green" id="nat-padd" type="button">Ajouter la paire</button></div>';
     return seul ? '<div class="nat-card"><span class="nat-h">Déclarer une paire 2022-7</span>' + corps + "</div>" :
-      '<details class="nat-card"><summary class="nat-h" style="cursor:pointer">Gérer les paires</summary>' + corps + "</details>";
+      '<details class="nat-card" data-keep="gestion"><summary class="nat-h" style="cursor:pointer">Gérer les paires</summary>' + corps + "</details>";
   }
 
   async function loadPairHome() {
@@ -397,8 +397,12 @@
     if (!r.ready) { box.innerHTML = '<div class="nat-note">Les deux jambes n\'ont pas encore été relevées.</div>' + gestionPairesHtml(false); bindPaires(); return; }
     await loadNames(r.pairs.flatMap((p) => [p.a, p.b, ...p.a_out, ...p.b_out]));
     if (!EL || tab !== "paire") return;
+    // Le contenu est remplacé d'un bloc, à hauteur égale : la page ne bouge pas. Les sections
+    // qu'on avait dépliées le restent.
+    const ouvertes = new Set([...box.querySelectorAll("details[data-keep][open]")].map((d) => d.dataset.keep));
     box.innerHTML = tuilesHtml(r) + synoptiqueHtml(r) + liensJumelesHtml(r, h) +
       '<div class="nat-grid2">' + bandesHtml(r) + incidentsHtml(r) + "</div>" + fluxParFluxHtml(r) + gestionPairesHtml(false);
+    box.querySelectorAll("details[data-keep]").forEach((d) => { if (ouvertes.has(d.dataset.keep)) d.open = true; });
     bindPaires();
     box.querySelectorAll("[data-twin]").forEach((el) => el.onclick = () => {
       const [cote, k] = el.dataset.twin.split("|");
@@ -482,7 +486,12 @@
         const y = (e) => (22 - Math.max(-R, Math.min(R, e)) / R * 20).toFixed(1);
         const d = pts.length > 1 ? "M" + pts.map((e, i) => (i / (pts.length - 1) * 300).toFixed(1) + " " + y(e)).join(" L") : "";
         jauge = '<div class="nat-gauge-h"><span>B − A</span><span class="nat-mono" style="color:' + COUL[ps] + ';font-weight:600">' + pct(l.ecart_pct) +
-          (l.state === "asym" ? " · " + (l.delta_bps < 0 ? "−" : "+") + gbps(Math.abs(l.delta_bps)) + " Gb/s" : "") + "</span></div>" +
+          (l.state === "asym" ? " · " + (l.delta_bps < 0 ? "−" : "+") + gbps(Math.abs(l.delta_bps)) + " Gb/s" : "") +
+          // Au-delà de la graduation, l'aiguille reste collée au bord : on le dit, et un écart
+          // massif se lit mieux en rapport (« B ≈ 2,0 × A ») qu'en pourcentage.
+          (Math.abs(l.ecart_pct) > R ? " · hors échelle" : "") +
+          (Math.abs(l.ecart_pct) >= 25 && l.a_bps && l.b_bps ? " · " + (l.b_bps >= l.a_bps ? "B ≈ " + (l.b_bps / l.a_bps).toFixed(1).replace(".", ",") + " × A" :
+            "A ≈ " + (l.a_bps / l.b_bps).toFixed(1).replace(".", ",") + " × B") : "") + "</span></div>" +
           '<div class="nat-gauge"><span class="band" style="left:' + pos(-seuil) + ";width:" + (seuil / R * 100).toFixed(2) + '%"></span><span class="zero"></span>' +
           '<span class="needle" style="left:' + pos(l.ecart_pct) + ";background:" + COUL[ps] + '"></span></div>' +
           '<div class="nat-gauge-t nat-mono"><span>−' + R + " %</span><span>0</span><span>+" + R + " %</span></div>" +
@@ -545,7 +554,7 @@
     const ordre = { none: 0, single: 1, both: 2, idle: 3 };
     const nomP = (k, outs) => nomDe(k) || outs.map(nomDe).find(Boolean) || null;
     const lignes = r.pairs.slice().sort((a, b) => ordre[a.state] - ordre[b.state]);
-    return '<details class="nat-card"><summary class="nat-h" style="cursor:pointer">Flux par flux · ' + r.pairs.length + " paires · " + esc(CLE[r.key_used] || r.key_used) + "</summary>" +
+    return '<details class="nat-card" data-keep="flux"><summary class="nat-h" style="cursor:pointer">Flux par flux · ' + r.pairs.length + " paires · " + esc(CLE[r.key_used] || r.key_used) + "</summary>" +
       (r.only_a.length || r.only_b.length ? '<span class="nat-note">' + (r.only_a.length ? r.only_a.length + " traduction(s) sans jumelle sur " + esc(nomSrc(r.pair.a)) + ". " : "") +
         (r.only_b.length ? r.only_b.length + " sur " + esc(nomSrc(r.pair.b)) + "." : "") + "</span>" : "") +
       '<div class="nat-tblwrap"><table class="nat-tbl"><thead><tr><th>Jambes</th><th>' + esc(nomSrc(r.pair.a)) + "</th><th>" + esc(nomSrc(r.pair.b)) + "</th><th></th></tr></thead><tbody>" +
@@ -732,7 +741,8 @@
       if (force) { await CTX.api("poll", { method: "POST", body: {} }); await new Promise((r) => setTimeout(r, 2500)); }
       await loadOverview(); await loadSource();
       if (tab === null) { tab = (overview.pairs || []).length ? "paire" : "vue"; renderTabs(); }
-      if (["vue", "trad", "paire"].includes(tab)) render(); else renderFresh();
+      if (tab === "paire" && !force && $("#nat-pair-home")) { renderFresh(); loadPairHome(); }
+      else if (["vue", "trad", "paire"].includes(tab)) render(); else renderFresh();
     } catch (e) {
       if (EL) $("#nat-content").innerHTML = '<div class="nat-err">' + esc(e.message) + "</div>";
     }
@@ -748,7 +758,9 @@
     // Rafraîchissement discret : seulement sur les vues d'état, et pas dans un onglet caché.
     timer = setInterval(() => {
       if (!EL || document.hidden || !["vue", "paire"].includes(tab)) return;
-      if (tab === "paire" && EL.querySelector("details[open]")) return;   // ne pas refermer ce qu'on lit
+      // Pas de mise à jour pendant une saisie (déclaration de paire) : elle effacerait le champ.
+      const actif = document.activeElement;
+      if (actif && EL.contains(actif) && /^(INPUT|SELECT|TEXTAREA)$/.test(actif.tagName)) return;
       if (tab === "trad" && filt.open) return;
       refresh(false);
     }, 20000);
