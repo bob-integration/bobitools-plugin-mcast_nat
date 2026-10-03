@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 
 import nat_model as M
 import nat_pair as NP
+import nat_sdp as SDP
 import nat_parse as P
 
 try:
@@ -242,6 +243,16 @@ def _relever(sw, cfg):
             # Gardé pour le diagnostic à distance (GET /diag/<id>) : descriptions et adresses,
             # rien de secret. Sert quand un nom de voisin manque à l'écran.
             cache["raw_ifs"] = ifs[:20000]
+            # Joins statiques des interfaces de sortie (ex. Eth1/33 vers VOISIN-A) : le
+            # générateur de config doit savoir si une sortie en appelle un. On ne lit que la
+            # config de CES interfaces, et on n'en garde que les lignes `ip igmp static-oif`.
+            for oif in sorted({r["static_oif"] for r in cache["reflect"]["rules"] if r["static_oif"]}):
+                try:
+                    lu = P.parse_interfaces(d.texte(f"show running-config interface {oif}"))
+                except DriverError:
+                    continue
+                f = cache["interfaces"].setdefault(oif, {"desc": "", "addrs": [], "static_oif": []})
+                f["static_oif"] = (lu.get(oif) or {}).get("static_oif") or []
         else:
             cache["interfaces"] = {}
         cache["static_at"] = now
@@ -661,6 +672,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and parts == ["poll"]:
                 _poll_now.set()
                 return self._send(202, {"ok": True})
+            if method == "POST" and parts == ["sdp"]:
+                return self._sdp(self._body())
             if method == "POST" and parts == ["captures"]:
                 return self._capture(self._body())
             if method == "DELETE" and len(parts) == 2 and parts[0] == "captures":
@@ -714,6 +727,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"captures": [{k: v for k, v in c.items() if k not in ("texts", "_model")}
                                                  for c in _captures()]})
         return self._send(404, {"error": "route inconnue"})
+
+    def _sdp(self, b):
+        """SDP collé → config de chaque spine + SDP à transmettre. N'écrit RIEN nulle part."""
+        sens = b.get("direction")
+        if sens not in ("egress", "ingress"):
+            return self._send(400, {"error": "sens attendu : egress (émission) ou ingress (réception)"})
+        cible = str(b.get("target") or "")
+        paire = next((p for p in _load_config()["pairs"] if p["id"] == cible), None)
+        ids = {"a": paire["a"], "b": paire["b"]} if paire else {"a": cible}
+        modeles, noms = {}, {}
+        for cote, sid in ids.items():
+            m, _e = _modele(sid)
+            modeles[cote] = m
+            noms[cote] = (m or {}).get("hostname") or next((s["name"] for s in _sources() if s["id"] == sid), sid)
+        if not any(modeles.values()):
+            return self._send(404, {"error": "aucun relevé pour cette cible"})
+        r = SDP.preparer(sens, str(b.get("sdp") or ""), modeles, noms, b.get("options") or {})
+        r["pair"] = bool(paire)
+        return self._send(200, r)
 
     def _capture(self, b):
         texts = {k: str(b.get(k) or "") for k in ("config", "interfaces", "summary", "nbm", "fwd", "rates")}

@@ -5,7 +5,7 @@ FROM python:3.13-slim
 RUN pip install --no-cache-dir requests
 
 WORKDIR /app
-COPY server.py nat_parse.py nat_model.py nat_pair.py /app/
+COPY server.py nat_parse.py nat_model.py nat_pair.py nat_sdp.py /app/
 
 # Volume propre : réglages, journal, états d'alerte, historique, captures.
 VOLUME ["/data"]

@@ -21,7 +21,7 @@
   const $ = (sel) => EL.querySelector(sel);
   const toast = (m, k) => CTX.toast(m, k || "info");
 
-  const TABS = [["paire", "Accueil 2022-7"], ["vue", "Par switch"], ["trad", "Traductions"],
+  const TABS = [["paire", "Accueil 2022-7"], ["vue", "Par switch"], ["trad", "Traductions"], ["sdp", "Nouveau flux"],
                 ["journal", "Journal"], ["captures", "Captures"], ["reglages", "Réglages"]];
   const ETATS = ["nat_ko", "lost", "multi", "hw_missing", "ok", "idle"];
   const LIB = { nat_ko: "NAT en échec", lost: "Entrée perdue", multi: "Deux émetteurs",
@@ -137,6 +137,7 @@
       if (tab === "vue") c.innerHTML = vueHtml();
       else if (tab === "trad") c.innerHTML = tradHtml();
       else if (tab === "paire") { c.innerHTML = paireHtml(); bindPaires(); loadPairHome(); }
+      else if (tab === "sdp") { c.innerHTML = sdpHtml(); bindSdp(); }
       else if (tab === "journal") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadJournal(); }
       else if (tab === "captures") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadCaptures(); }
       else if (tab === "reglages") { c.innerHTML = '<div class="meta">Chargement…</div>'; loadReglages(); }
@@ -404,6 +405,7 @@
       '<div class="nat-grid2">' + bandesHtml(r) + incidentsHtml(r) + "</div>" + fluxParFluxHtml(r) + gestionPairesHtml(false);
     box.querySelectorAll("details[data-keep]").forEach((d) => { if (ouvertes.has(d.dataset.keep)) d.open = true; });
     bindPaires();
+    bindPf();
     box.querySelectorAll("[data-twin]").forEach((el) => el.onclick = () => {
       const [cote, k] = el.dataset.twin.split("|");
       curId = cote === "b" ? r.pair.b : r.pair.a; renderSelect();
@@ -549,19 +551,105 @@
       "</div></div>").join("") : '<span class="nat-note">Aucun incident : chaque flux utilisé tient sur ses deux jambes, et les liens sont symétriques.</span>') + "</section>";
   }
 
+  // « Flux par flux » : filtres et tri conservés d'un rafraîchissement à l'autre.
+  let pfilt = { states: new Set(), src: "", fam: "", q: "", tri: "etat" };
+  let pairData = null;
+  const ORDRE_PAIRE = { none: 0, single: 1, both: 2, idle: 3 };
+  const ipNum = (g) => String(g).split(".").reduce((a, x) => a * 256 + (+x || 0), 0);
+  const famP = (p) => (p.dir === "egress" ? "Sortant " : "Entrant ") + (p.mode || "");
+  const emetteurP = (p) => p.a_name || p.b_name || "";
+  const nomPlanP = (p) => nomDe(p.a) || nomDe(p.b) || p.a_out.concat(p.b_out).map(nomDe).find(Boolean) || null;
+
   function fluxParFluxHtml(r) {
-    const legSev = (st) => SEV[st] || "neutral";
-    const ordre = { none: 0, single: 1, both: 2, idle: 3 };
-    const nomP = (k, outs) => nomDe(k) || outs.map(nomDe).find(Boolean) || null;
-    const lignes = r.pairs.slice().sort((a, b) => ordre[a.state] - ordre[b.state]);
+    pairData = r;
     return '<details class="nat-card" data-keep="flux"><summary class="nat-h" style="cursor:pointer">Flux par flux · ' + r.pairs.length + " paires · " + esc(CLE[r.key_used] || r.key_used) + "</summary>" +
       (r.only_a.length || r.only_b.length ? '<span class="nat-note">' + (r.only_a.length ? r.only_a.length + " traduction(s) sans jumelle sur " + esc(nomSrc(r.pair.a)) + ". " : "") +
         (r.only_b.length ? r.only_b.length + " sur " + esc(nomSrc(r.pair.b)) + "." : "") + "</span>" : "") +
+      '<div class="nat-filters"><span id="nat-pf-chips" class="nat-chips">' + pfChips() + "</span>" + pfSelects() +
+      '<input type="search" id="nat-pf-q" placeholder="Groupe, émetteur, nom du plan…" value="' + esc(pfilt.q) + '" aria-label="Rechercher un flux"></div>' +
+      '<div id="nat-pf-body">' + pfBody() + "</div></details>";
+  }
+
+  function pfChips() {
+    const c = { both: 0, single: 0, none: 0, idle: 0 };
+    pairData.pairs.forEach((p) => c[p.state]++);
+    return ["none", "single", "both", "idle"].filter((k) => c[k]).map((k) => '<button type="button" class="nat-pill ' + ETIQ[k][0] +
+      (pfilt.states.size && !pfilt.states.has(k) ? " off" : "") + '" data-pfst="' + k + '">' + ETIQ[k][1] + " · " + c[k] + "</button>").join("");
+  }
+
+  function pfSelects() {
+    const ems = {}, fams = {};
+    pairData.pairs.forEach((p) => {
+      // Un flux compte une fois par émetteur, même quand les deux jambes le citent.
+      new Set([p.a_name, p.b_name].filter(Boolean)).forEach((n) => { ems[n] = (ems[n] || 0) + 1; });
+      fams[famP(p)] = (fams[famP(p)] || 0) + 1;
+    });
+    const sansEm = pairData.pairs.filter((p) => !emetteurP(p)).length;
+    const opt = (v, lib, sel) => '<option value="' + esc(v) + '"' + (v === sel ? " selected" : "") + ">" + esc(lib) + "</option>";
+    return '<select id="nat-pf-src" aria-label="Émetteur">' + opt("", "Tous les émetteurs", pfilt.src) +
+      Object.keys(ems).sort((a, b) => a.localeCompare(b, "fr", { numeric: true })).map((n) => opt(n, n + " (" + ems[n] + ")", pfilt.src)).join("") +
+      (sansEm ? opt("—", "Sans émetteur actif (" + sansEm + ")", pfilt.src) : "") + "</select>" +
+      '<select id="nat-pf-fam" aria-label="Famille">' + opt("", "Toutes les familles", pfilt.fam) +
+      Object.keys(fams).map((f) => opt(f, f + " (" + fams[f] + ")", pfilt.fam)).join("") + "</select>" +
+      '<label class="muted" for="nat-pf-tri" style="font-size:.85rem">Trier par</label><select id="nat-pf-tri">' +
+      opt("etat", "état (problèmes d'abord)", pfilt.tri) + opt("entree", "adresse d'entrée", pfilt.tri) + opt("emetteur", "émetteur", pfilt.tri) + opt("nom", "nom du plan", pfilt.tri) + "</select>";
+  }
+
+  function pfBody() {
+    const r = pairData, legSev = (st) => SEV[st] || "neutral";
+    const q = pfilt.q.trim().toLowerCase();
+    const nomP = (k, outs) => nomDe(k) || outs.map(nomDe).find(Boolean) || null;
+    let lignes = r.pairs.filter((p) => (!pfilt.states.size || pfilt.states.has(p.state)) &&
+      (!pfilt.fam || famP(p) === pfilt.fam) &&
+      (!pfilt.src || (pfilt.src === "—" ? !emetteurP(p) : p.a_name === pfilt.src || p.b_name === pfilt.src)) &&
+      (!q || [p.a, p.b, ...p.a_out, ...p.b_out, p.a_name, p.b_name, (nomPlanP(p) || {}).name, (nomPlanP(p) || {}).detail]
+        .some((x) => x && String(x).toLowerCase().includes(q))));
+    const parIp = (a, b) => ipNum(a.a) - ipNum(b.a);
+    const tris = {
+      etat: (a, b) => ORDRE_PAIRE[a.state] - ORDRE_PAIRE[b.state] || parIp(a, b),
+      entree: parIp,
+      emetteur: (a, b) => (emetteurP(a) || "￿").localeCompare(emetteurP(b) || "￿", "fr", { numeric: true }) || parIp(a, b),
+      nom: (a, b) => ((nomPlanP(a) || {}).name || "￿").localeCompare((nomPlanP(b) || {}).name || "￿", "fr", { numeric: true }) || parIp(a, b),
+    };
+    lignes = lignes.sort(tris[pfilt.tri] || tris.etat);
+    const total = lignes.length;
+    return '<span class="nat-note">' + (total === r.pairs.length ? total + " flux" : total + " flux sur " + r.pairs.length) +
+      (total > 400 ? " — les 400 premiers affichés" : "") +
+      (pfilt.states.size || pfilt.src || pfilt.fam || pfilt.q ? ' · <button type="button" class="btn" id="nat-pf-clear">Tout afficher</button>' : "") + "</span>" +
       '<div class="nat-tblwrap"><table class="nat-tbl"><thead><tr><th>Jambes</th><th>' + esc(nomSrc(r.pair.a)) + "</th><th>" + esc(nomSrc(r.pair.b)) + "</th><th></th></tr></thead><tbody>" +
-      lignes.slice(0, 400).map((p) => '<tr><td><span class="nat-legs"><span class="nat-leg ' + legSev(p.a_state) + '">A</span><span class="nat-leg ' + legSev(p.b_state) + '">B</span></span></td>' +
+      (lignes.slice(0, 400).map((p) => '<tr><td><span class="nat-legs"><span class="nat-leg ' + legSev(p.a_state) + '">A</span><span class="nat-leg ' + legSev(p.b_state) + '">B</span></span></td>' +
         '<td><span class="nat-mono">' + esc(p.a) + " → " + esc(p.a_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.a_state]) + (p.a_name ? " · " + esc(p.a_name) : "") + "</div>" + nomHtml(nomP(p.a, p.a_out)) + "</td>" +
         '<td><span class="nat-mono">' + esc(p.b) + " → " + esc(p.b_out.join(", ")) + '</span><div class="muted" style="font-size:.78rem">' + esc(LIB[p.b_state]) + (p.b_name ? " · " + esc(p.b_name) : "") + "</div>" + nomHtml(nomP(p.b, p.b_out)) + "</td>" +
-        '<td><span class="nat-pill ' + ETIQ[p.state][0] + '">' + ETIQ[p.state][1] + "</span></td></tr>").join("") + "</tbody></table></div></details>";
+        '<td><span class="nat-pill ' + ETIQ[p.state][0] + '">' + ETIQ[p.state][1] + "</span></td></tr>").join("") ||
+        '<tr><td colspan="4" class="muted">Aucun flux ne correspond.</td></tr>') + "</tbody></table></div>";
+  }
+
+  function bindPf() {
+    if (!$("#nat-pf-body")) return;
+    const maj = () => {
+      $("#nat-pf-body").innerHTML = pfBody();
+      $("#nat-pf-chips").innerHTML = pfChips();
+      bindPfDyn();
+    };
+    const bindPfDyn = () => {
+      EL.querySelectorAll("[data-pfst]").forEach((b) => b.onclick = () => {
+        const k = b.dataset.pfst;
+        if (pfilt.states.has(k)) pfilt.states.delete(k); else pfilt.states.add(k);
+        maj();
+      });
+      const clr = $("#nat-pf-clear");
+      if (clr) clr.onclick = () => {
+        pfilt = { states: new Set(), src: "", fam: "", q: "", tri: pfilt.tri };
+        $("#nat-pf-q").value = ""; $("#nat-pf-src").value = ""; $("#nat-pf-fam").value = "";
+        maj();
+      };
+    };
+    $("#nat-pf-src").onchange = (e) => { pfilt.src = e.target.value; maj(); };
+    $("#nat-pf-fam").onchange = (e) => { pfilt.fam = e.target.value; maj(); };
+    $("#nat-pf-tri").onchange = (e) => { pfilt.tri = e.target.value; maj(); };
+    const q = $("#nat-pf-q");
+    q.oninput = () => { pfilt.q = q.value; clearTimeout(q._t); q._t = setTimeout(maj, 150); };
+    bindPfDyn();
   }
 
   function bindPaires() {
@@ -584,6 +672,132 @@
     const pairs = (overview.config.pairs || []).concat([{ a, b, key: key || "auto", label: label || "" }]);
     try { await saveConfig({ pairs }); toast("Paire déclarée"); await loadOverview(); tab = "paire"; renderTabs(); render(); }
     catch (e) { if (!e.rightsShown) toast(e.message, "error"); }
+  }
+
+  // ── Nouveau flux : SDP collé → config + SDP à transmettre (rien n'est écrit) ──
+  let sdpEtat = { direction: "egress", target: "", text: "", result: null, sorties: { a: {}, b: {} }, sources: "famille" };
+
+  function copier(txt) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(txt);
+    // Hors HTTPS (instance en http://192.168…), l'API presse-papiers est refusée : repli classique.
+    const ta = document.createElement("textarea");
+    ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } finally { ta.remove(); }
+    return Promise.resolve();
+  }
+  function telecharger(nom, txt) {
+    const url = URL.createObjectURL(new Blob([txt], { type: "application/sdp" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = nom; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function sdpCibles() {
+    const pairs = ((overview.config || {}).pairs || []).map((p) => ({ id: p.id, lib: "Paire 2022-7 · " + pairLabel(p) }));
+    const srcs = (overview.sources || []).filter((x) => x.has_nat).map((x) => ({ id: x.id, lib: x.name + (x.kind === "capture" ? " (capture)" : "") }));
+    return pairs.concat(srcs);
+  }
+
+  function sdpHtml() {
+    const cibles = sdpCibles();
+    if (!cibles.length) return '<div class="nat-note">Aucun switch avec du NAT n\'est encore relevé : le générateur copie la forme des règles existantes, il lui en faut.</div>';
+    if (!cibles.some((c) => c.id === sdpEtat.target)) sdpEtat.target = (pairSel && cibles.some((c) => c.id === pairSel)) ? pairSel : cibles[0].id;
+    const sens = (v, titre, aide) => '<label class="nat-sens' + (sdpEtat.direction === v ? " on" : "") + '"><input type="radio" name="nat-sens" value="' + v + '"' +
+      (sdpEtat.direction === v ? " checked" : "") + "><span><b>" + titre + '</b><span class="muted">' + aide + "</span></span></label>";
+    return '<div class="nat-card"><span class="nat-h">Préparer un flux à traduire</span>' +
+      '<div class="nat-note">Collez un SDP : l\'outil en tire la règle de NAT de chaque spine, copiée sur une traduction voisine de la même famille, et le SDP à transmettre. ' +
+      "<b>Rien n'est écrit sur les switchs</b> : la config est à relire, puis à appliquer à la main, une jambe après l'autre.</div>" +
+      '<div class="nat-sens-row">' + sens("egress", "Émission", "on envoie un de nos flux à l'extérieur — collez le SDP de notre source") +
+      sens("ingress", "Réception", "on reçoit un flux de l'extérieur — collez le SDP reçu de l'autre bout") + "</div>" +
+      '<div class="nat-form wide"><label for="nat-sdp-target">Cible</label><select id="nat-sdp-target">' +
+      cibles.map((c) => '<option value="' + esc(c.id) + '"' + (c.id === sdpEtat.target ? " selected" : "") + ">" + esc(c.lib) + "</option>").join("") + "</select>" +
+      '<label for="nat-sdp-text">SDP<br><span class="muted" style="font-size:.75rem">un SDP 2022-7 (a=group:DUP) donne les deux jambes d\'un coup</span></label>' +
+      '<textarea id="nat-sdp-text" spellcheck="false" style="min-height:180px" placeholder="v=0&#10;o=- … IN IP4 …&#10;m=video 5004 RTP/AVP 96&#10;c=IN IP4 239.100.0.17/64&#10;a=source-filter: incl IN IP4 239.100.0.17 192.168.72.62&#10;…">' + esc(sdpEtat.text) + "</textarea>" +
+      (sdpEtat.direction === "egress" ? '<label for="nat-sdp-src">Sources</label><select id="nat-sdp-src"><option value="famille"' + (sdpEtat.sources === "famille" ? " selected" : "") +
+        ">toutes les sources candidates de la famille (secours entre serveurs)</option><option value=\"sdp\"" + (sdpEtat.sources === "sdp" ? " selected" : "") + ">seulement la source du SDP</option></select>" : "") +
+      '</div><div class="nat-actions"><button class="btn btn-green" id="nat-sdp-go" type="button">Préparer</button>' +
+      (sdpEtat.result ? '<button class="btn" id="nat-sdp-reset" type="button">Effacer</button>' : "") + "</div></div>" +
+      '<div id="nat-sdp-res" class="nat-content">' + (sdpEtat.result ? sdpResultatHtml(sdpEtat.result) : "") + "</div>";
+  }
+
+  function sdpResultatHtml(r) {
+    let h = (r.errors || []).map((e) => '<div class="nat-err">' + esc(e) + "</div>").join("") +
+      (r.warnings || []).map((w) => '<div class="nat-inc warning"><span>' + esc(w) + "</span></div>").join("");
+    if ((r.errors || []).length && !(r.legs || []).length) return h;
+    h += '<div class="nat-lcards">' + (r.legs || []).map((leg) => {
+      const i = leg.input;
+      const ent = '<span class="nat-mono">' + esc(i.group) + "</span> depuis <span class=\"nat-mono\">" + esc(i.source || "?") + "</span> · " + esc(i.media) + (i.port ? " · port " + i.port : "");
+      const lignes = leg.outputs.map((o, n) => "<tr><td>" + (leg.existing ? '<span class="nat-mono">' + esc(o.group) + "</span>" :
+          '<input class="nat-mono" type="text" size="15" data-sortie="' + leg.side + "|" + n + '" value="' + esc(o.group) + '" aria-label="Groupe de sortie">') + "</td>" +
+        '<td class="m">' + (o.udp_dst ? esc((o.udp_src || "—") + " → " + o.udp_dst) : "inchangés") + "</td><td>" + esc(o.oif_name || o.oif_short || "fabric local") +
+        (o.oif_short && o.oif_name ? ' <span class="muted nat-mono">' + esc(o.oif_short) + "</span>" : "") + "</td><td>" +
+        (o.static_join ? "oui" : '<span class="muted">non</span>') + "</td></tr>").join("");
+      const modele = leg.template && !leg.existing ? '<span class="nat-note">Forme copiée sur <span class="nat-mono">' + esc(leg.template) + "</span>" +
+        (leg.template_outputs ? " → " + leg.template_outputs.map((o) => '<span class="nat-mono">' + esc(o.group) + (o.udp_dst ? ":" + o.udp_dst : "") + "</span>").join(", ") : "") +
+        (leg.sources ? " · " + leg.sources.length + " source" + (leg.sources.length > 1 ? "s" : "") + " candidate" + (leg.sources.length > 1 ? "s" : "") : "") + "</span>" : "";
+      return '<article class="nat-lcard' + ((leg.errors || []).length ? " warning" : "") + '"><div class="nat-actions" style="align-items:center"><span class="nat-leg2 ' + leg.side + '" style="width:22px">' +
+        leg.side.toUpperCase() + "</span><b>" + esc(leg.spine) + '</b><span class="nat-spacer"></span>' +
+        (leg.existing ? pill("ok", "Déjà traduit") : pill("idle", "Nouvelle règle")) + "</div>" +
+        '<div style="font-size:.88rem">Entrée : ' + ent + "</div>" + modele +
+        (leg.errors || []).map((e) => '<div class="nat-issue">' + esc(e) + "</div>").join("") +
+        (leg.warnings || []).map((w) => '<div class="nat-note">' + esc(w) + "</div>").join("") +
+        (lignes ? '<div class="nat-tblwrap"><table class="nat-tbl"><thead><tr><th>Sortie</th><th>UDP</th><th>Vers</th><th>Join statique</th></tr></thead><tbody>' + lignes + "</tbody></table></div>" : "") +
+        "</article>";
+    }).join("") + "</div>";
+    if ((r.legs || []).some((l) => !l.existing)) h += '<div class="nat-actions"><button class="btn" id="nat-sdp-recalc" type="button">Recalculer avec ces adresses</button>' +
+      '<span class="nat-note">Une adresse de sortie est proposée en prolongeant la voisine ; corrigez-la si l\'autre bout en impose une autre.</span></div>';
+    const blocs = [];
+    Object.entries(r.configs || {}).forEach(([cote, txt]) => blocs.push({ titre: "Config · " + ((r.legs.find((l) => l.side === cote) || {}).spine || cote), txt, nom: null }));
+    (r.sdps || []).forEach((x, n) => blocs.push({ titre: "SDP · " + x.title, txt: x.text, nom: "flux-" + (n + 1) + ".sdp" }));
+    h += blocs.map((b, n) => '<section class="nat-card"><div class="nat-actions" style="align-items:center"><span class="nat-h">' + esc(b.titre) + '</span><span class="nat-spacer"></span>' +
+      '<button class="btn" type="button" data-copy="' + n + '">Copier</button>' + (b.nom ? '<button class="btn" type="button" data-dl="' + n + '">Télécharger</button>' : "") +
+      '</div><pre class="nat-pre">' + esc(b.txt) + "</pre></section>").join("");
+    sdpEtat._blocs = blocs;
+    return h;
+  }
+
+  async function sdpPreparer() {
+    const box = $("#nat-sdp-res");
+    sdpEtat.text = $("#nat-sdp-text").value;
+    if (!sdpEtat.text.trim()) { toast("Collez d'abord un SDP", "error"); return; }
+    box.innerHTML = '<div class="meta">Préparation…</div>';
+    try {
+      sdpEtat.result = await CTX.api("sdp", { body: { direction: sdpEtat.direction, target: sdpEtat.target, sdp: sdpEtat.text,
+        options: { sorties: sdpEtat.sorties, sources: sdpEtat.sources } } });
+    } catch (e) { box.innerHTML = '<div class="nat-err">' + esc(e.message) + "</div>"; return; }
+    if (!EL || tab !== "sdp") return;
+    box.innerHTML = sdpResultatHtml(sdpEtat.result);
+    bindSdpResultat();
+  }
+
+  function bindSdpResultat() {
+    EL.querySelectorAll("[data-sortie]").forEach((inp) => inp.onchange = () => {
+      const [cote, n] = inp.dataset.sortie.split("|");
+      sdpEtat.sorties[cote] = sdpEtat.sorties[cote] || {};
+      sdpEtat.sorties[cote][n] = inp.value.trim();
+    });
+    const rc = $("#nat-sdp-recalc");
+    if (rc) rc.onclick = sdpPreparer;
+    EL.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copier(sdpEtat._blocs[+b.dataset.copy].txt).then(() => toast("Copié")));
+    EL.querySelectorAll("[data-dl]").forEach((b) => b.onclick = () => { const x = sdpEtat._blocs[+b.dataset.dl]; telecharger(x.nom, x.txt); });
+  }
+
+  function bindSdp() {
+    EL.querySelectorAll('input[name="nat-sens"]').forEach((r) => r.onchange = () => {
+      sdpEtat.direction = r.value; sdpEtat.text = $("#nat-sdp-text").value; sdpEtat.result = null; sdpEtat.sorties = { a: {}, b: {} }; render();
+    });
+    const t = $("#nat-sdp-target");
+    if (t) t.onchange = () => { sdpEtat.target = t.value; sdpEtat.sorties = { a: {}, b: {} }; };
+    const sr = $("#nat-sdp-src");
+    if (sr) sr.onchange = () => { sdpEtat.sources = sr.value; };
+    const ta = $("#nat-sdp-text");
+    if (ta) ta.oninput = () => { sdpEtat.sorties = { a: {}, b: {} }; };   // nouveau SDP : on oublie les adresses corrigées
+    const go = $("#nat-sdp-go");
+    if (go) go.onclick = sdpPreparer;
+    const rs = $("#nat-sdp-reset");
+    if (rs) rs.onclick = () => { sdpEtat = { direction: sdpEtat.direction, target: sdpEtat.target, text: "", result: null, sorties: { a: {}, b: {} }, sources: "famille" }; render(); };
+    if (sdpEtat.result) bindSdpResultat();
   }
 
   // ── Journal ──

@@ -121,7 +121,7 @@ def parse_interfaces(texte):
     res = {}
 
     def fiche(n):
-        return res.setdefault(canon(n), {"desc": "", "addrs": []})
+        return res.setdefault(canon(n), {"desc": "", "addrs": [], "static_oif": []})
 
     cur = None
     for ligne in (texte or "").splitlines():
@@ -143,6 +143,11 @@ def parse_interfaces(texte):
             m = re.match(r"^\s+ip address (\d+\.\d+\.\d+\.\d+)/(\d+)", ligne)
             if m:
                 cur["addrs"].append(f"{m.group(1)}/{m.group(2)}")
+            # Joins statiques vers l'extérieur : un flux sortant vers VOISIN-A a SA ligne sur
+            # Eth1/33 en plus de la règle de NAT. Le générateur doit les reproduire.
+            m = re.match(r"^\s+ip igmp static-oif (\d+\.\d+\.\d+\.\d+)(?: source (\d+\.\d+\.\d+\.\d+))?", ligne)
+            if m:
+                cur["static_oif"].append([m.group(1), m.group(2)])
             continue
         cur = None
         # show ip interface brief : « Eth1/16  192.168.72.61  protocol-up/link-up/admin-up »
@@ -306,7 +311,7 @@ def assainir_config(texte):
         elif re.match(r"^interface \S+\s*$", l):
             garde.append(l.rstrip())
             dans_if = True
-        elif dans_if and re.match(r"^\s+(description |ip address \d)", l):
+        elif dans_if and re.match(r"^\s+(description |ip address \d|ip igmp static-oif )", l):
             garde.append(l.rstrip())
         elif not l.startswith(" "):
             dans_if = False

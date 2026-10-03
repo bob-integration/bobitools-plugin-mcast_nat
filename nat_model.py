@@ -129,7 +129,7 @@ def construire(cfg, interfaces, summary, nbm, fwd, rates, hostname=None):
                             "oif": oif, "oif_short": court(oif) if oif else None,
                             "oif_name": _nom_if(interfaces, oif) if oif else "",
                             "receivers": (e or {}).get("oifs"), "nbm_rx": nb.get("rx"),
-                            "hw": hw, "shared_with": autres,
+                            "hw": hw, "shared_with": autres, "static_oif": o["static_oif"],
                             "candidates": len(o["from_sources"])})
         sorties.sort(key=lambda x: (x["oif"] or "", x["group"]))
 
@@ -173,7 +173,12 @@ def construire(cfg, interfaces, summary, nbm, fwd, rates, hostname=None):
     return {"hostname": hostname or cfg.get("hostname"), "source_if": cfg.get("source_if"),
             "modes": modes, "translations": out, "families": familles(out, interfaces),
             "links": liens(cfg, interfaces, rates, out), "ignored": cfg.get("ignored") or [],
-            "counts": compter(out), "hw_checked": fwd is not None}
+            "counts": compter(out), "hw_checked": fwd is not None,
+            # Pour le générateur de config : joins statiques par interface, et groupes que le
+            # switch a déjà vus (une adresse « libre » ne doit pas en faire partie).
+            "static_joins": {k: v.get("static_oif") or [] for k, v in interfaces.items()
+                             if v.get("static_oif")},
+            "live_groups": sorted({g for (_s, g) in summary})}
 
 
 def _cle_ip(ip):

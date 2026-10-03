@@ -223,3 +223,12 @@ button.nat-twin { border: 0; padding: 0; background: none; cursor: pointer; }
 button.nat-twin:hover i, button.nat-twin:focus-visible i { outline: 1px solid var(--text); }
 details.nat-card > summary { list-style: revert; }
 @media (max-width: 900px) { .nat-syn-wire { display: none; } }
+
+/* ── Nouveau flux ── */
+.nat-sens-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.nat-sens { display: flex; gap: 10px; align-items: flex-start; border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.nat-sens.on { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
+.nat-sens > span { display: flex; flex-direction: column; gap: 2px; font-size: .88rem; }
+.nat-sens .muted { font-size: .8rem; }
+.nat-pre { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--bg-soft, color-mix(in oklch, var(--text) 5%, transparent));
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: .78rem; line-height: 1.45; overflow-x: auto; white-space: pre; }
